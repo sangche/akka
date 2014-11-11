@@ -124,3 +124,9 @@ In order to make cluster routers smarter about when they can start local routees
 In case you have implemented a custom Pool you will have to update the method's signature,
 however the implementation can remain the same if you don't need to rely on an ActorSystem in your logic.
 
+Default interval for TestKit.awaitAssert changed to 100 ms
+==========================================================
+
+Default check interval changed from 800 ms to 100 ms. You can define the interval explicitly if you need a
+longer interval.
+
