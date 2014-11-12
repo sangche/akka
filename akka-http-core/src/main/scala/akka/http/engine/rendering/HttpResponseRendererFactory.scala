@@ -8,12 +8,14 @@ import scala.annotation.tailrec
 import akka.event.LoggingAdapter
 import akka.util.ByteString
 import akka.stream.scaladsl.Source
-import akka.stream.Transformer
 import akka.http.model._
 import akka.http.util._
 import RenderSupport._
 import HttpProtocols._
 import headers._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.TransitivePullOp
 
 /**
  * INTERNAL API
@@ -50,12 +52,12 @@ private[http] class HttpResponseRendererFactory(serverHeader: Option[headers.Ser
 
   def newRenderer: HttpResponseRenderer = new HttpResponseRenderer
 
-  final class HttpResponseRenderer extends Transformer[ResponseRenderingContext, Source[ByteString]] {
+  final class HttpResponseRenderer extends TransitivePullOp[ResponseRenderingContext, Source[ByteString]] {
     private[this] var close = false // signals whether the connection is to be closed after the current response
 
     override def isComplete = close
 
-    def onNext(ctx: ResponseRenderingContext): List[Source[ByteString]] = {
+    override def onPush(ctx: ResponseRenderingContext, opCtxt: Context[Source[ByteString]]): Directive = {
       val r = new ByteStringRendering(responseHeaderSizeHint)
 
       import ctx.response._
@@ -134,23 +136,23 @@ private[http] class HttpResponseRendererFactory(serverHeader: Option[headers.Ser
               r ~~ `Transfer-Encoding` ~~ ChunkedBytes ~~ CrLf
         }
 
-      def byteStrings(entityBytes: ⇒ Source[ByteString]): List[Source[ByteString]] =
-        renderByteStrings(r, entityBytes, skipEntity = noEntity)
+      def byteStrings(entityBytes: ⇒ Source[ByteString]): Source[ByteString] =
+        renderByteStrings2(r, entityBytes, skipEntity = noEntity)
 
-      def completeResponseRendering(entity: ResponseEntity): List[Source[ByteString]] =
+      def completeResponseRendering(entity: ResponseEntity): Source[ByteString] =
         entity match {
           case HttpEntity.Strict(_, data) ⇒
             renderHeaders(headers.toList)
             renderEntityContentType(r, entity)
             r ~~ `Content-Length` ~~ data.length ~~ CrLf ~~ CrLf
             val entityBytes = if (noEntity) Nil else data :: Nil
-            Source(r.get :: entityBytes) :: Nil
+            Source(r.get :: entityBytes)
 
           case HttpEntity.Default(_, contentLength, data) ⇒
             renderHeaders(headers.toList)
             renderEntityContentType(r, entity)
             r ~~ `Content-Length` ~~ contentLength ~~ CrLf ~~ CrLf
-            byteStrings(data.transform("checkContentLength", () ⇒ new CheckContentLengthTransformer(contentLength)))
+            byteStrings(data.transform2("checkContentLength", () ⇒ new CheckContentLengthTransformer(contentLength)))
 
           case HttpEntity.CloseDelimited(_, data) ⇒
             renderHeaders(headers.toList, alwaysClose = ctx.requestMethod != HttpMethods.HEAD)
@@ -165,12 +167,12 @@ private[http] class HttpResponseRendererFactory(serverHeader: Option[headers.Ser
               renderHeaders(headers.toList)
               renderEntityContentType(r, entity)
               r ~~ CrLf
-              byteStrings(chunks.transform("renderChunks", () ⇒ new ChunkTransformer))
+              byteStrings(chunks.transform2("renderChunks", () ⇒ new ChunkTransformer))
             }
         }
 
       renderStatusLine()
-      completeResponseRendering(entity)
+      opCtxt.push(completeResponseRendering(entity))
     }
   }
 }

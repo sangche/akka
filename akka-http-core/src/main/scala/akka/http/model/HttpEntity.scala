@@ -14,9 +14,13 @@ import scala.util.control.NonFatal
 import akka.util.ByteString
 import akka.stream.FlowMaterializer
 import akka.stream.scaladsl._
-import akka.stream.{ TimerTransformer, Transformer }
+import akka.stream.TimerTransformer
 import akka.http.util._
 import japi.JavaMapping.Implicits._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.DeterministicOp
+import akka.stream.OldTransformer
 
 /**
  * Models the entity (aka "body" or "content) of an HTTP message.
@@ -70,7 +74,7 @@ sealed trait HttpEntity extends japi.HttpEntity {
    * This method may only throw an exception if the `transformer` function throws an exception while creating the transformer.
    * Any other errors are reported through the new entity data stream.
    */
-  def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): HttpEntity
+  def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): HttpEntity
 
   /**
    * Creates a copy of this HttpEntity with the `contentType` overridden with the given one.
@@ -95,13 +99,13 @@ sealed trait BodyPartEntity extends HttpEntity with japi.BodyPartEntity {
 sealed trait RequestEntity extends HttpEntity with japi.RequestEntity with ResponseEntity {
   def withContentType(contentType: ContentType): RequestEntity
 
-  override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): RequestEntity
+  override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): RequestEntity
 }
 /* An entity that can be used for responses */
 sealed trait ResponseEntity extends HttpEntity with japi.ResponseEntity {
   def withContentType(contentType: ContentType): ResponseEntity
 
-  override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): ResponseEntity
+  override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): ResponseEntity
 }
 /* An entity that can be used for requests, responses, and body parts */
 sealed trait UniversalEntity extends japi.UniversalEntity with MessageEntity with BodyPartEntity {
@@ -112,7 +116,7 @@ sealed trait UniversalEntity extends japi.UniversalEntity with MessageEntity wit
    * Transforms this' entities data bytes with a transformer that will produce exactly the number of bytes given as
    * ``newContentLength``.
    */
-  def transformDataBytes(newContentLength: Long, transformer: () ⇒ Transformer[ByteString, ByteString]): UniversalEntity
+  def transformDataBytes(newContentLength: Long, transformer: () ⇒ OldTransformer[ByteString, ByteString]): UniversalEntity
 }
 
 object HttpEntity {
@@ -157,8 +161,9 @@ object HttpEntity {
     override def toStrict(timeout: FiniteDuration)(implicit ec: ExecutionContext, fm: FlowMaterializer) =
       FastFuture.successful(this)
 
-    override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): MessageEntity = {
+    override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): MessageEntity = {
       try {
+        // FIXME OldTransformer, Transformer used as something else
         val t = transformer()
         val newData = (t.onNext(data) ++ t.onTermination(None)).join
         copy(data = newData)
@@ -167,7 +172,7 @@ object HttpEntity {
           Chunked(contentType, Source.failed(ex))
       }
     }
-    override def transformDataBytes(newContentLength: Long, transformer: () ⇒ Transformer[ByteString, ByteString]): UniversalEntity = {
+    override def transformDataBytes(newContentLength: Long, transformer: () ⇒ OldTransformer[ByteString, ByteString]): UniversalEntity = {
       val t = transformer()
       val newData = (t.onNext(data) ++ t.onTermination(None)).join
       assert(newData.length.toLong == newContentLength, s"Transformer didn't produce as much bytes (${newData.length}:'${newData.utf8String}') as claimed ($newContentLength)")
@@ -194,12 +199,12 @@ object HttpEntity {
 
     def dataBytes: Source[ByteString] = data
 
-    override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): Chunked = {
+    override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): Chunked = {
       val chunks = data.transform("transformDataBytes-Default", () ⇒ transformer().map(Chunk(_): ChunkStreamPart))
 
       HttpEntity.Chunked(contentType, chunks)
     }
-    override def transformDataBytes(newContentLength: Long, transformer: () ⇒ Transformer[ByteString, ByteString]): UniversalEntity =
+    override def transformDataBytes(newContentLength: Long, transformer: () ⇒ OldTransformer[ByteString, ByteString]): UniversalEntity =
       Default(contentType, newContentLength, data.transform("transformDataBytes-with-new-length-Default", transformer))
 
     def withContentType(contentType: ContentType): Default =
@@ -235,7 +240,7 @@ object HttpEntity {
     def withContentType(contentType: ContentType): CloseDelimited =
       if (contentType == this.contentType) this else copy(contentType = contentType)
 
-    override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): CloseDelimited =
+    override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): CloseDelimited =
       HttpEntity.CloseDelimited(contentType,
         data.transform("transformDataBytes-CloseDelimited", transformer))
 
@@ -253,7 +258,7 @@ object HttpEntity {
     def withContentType(contentType: ContentType): IndefiniteLength =
       if (contentType == this.contentType) this else copy(contentType = contentType)
 
-    override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): IndefiniteLength =
+    override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): IndefiniteLength =
       HttpEntity.IndefiniteLength(contentType,
         data.transform("transformDataBytes-IndefiniteLength", transformer))
 
@@ -272,32 +277,58 @@ object HttpEntity {
     def dataBytes: Source[ByteString] =
       chunks.map(_.data).filter(_.nonEmpty)
 
-    override def transformDataBytes(transformer: () ⇒ Transformer[ByteString, ByteString]): Chunked = {
+    override def transformDataBytes(transformer: () ⇒ OldTransformer[ByteString, ByteString]): Chunked = {
       val newChunks =
-        chunks.transform("transformDataBytes-Chunked", () ⇒ new Transformer[ChunkStreamPart, ChunkStreamPart] {
+        chunks.transform2("transformDataBytes-Chunked", () ⇒ new DeterministicOp[ChunkStreamPart, ChunkStreamPart] {
           val byteTransformer = transformer()
           var sentLastChunk = false
+          private[this] var resultIterator: Iterator[ChunkStreamPart] = Iterator.empty
 
           override def isComplete: Boolean = byteTransformer.isComplete
 
-          def onNext(element: ChunkStreamPart): immutable.Seq[ChunkStreamPart] = element match {
-            case Chunk(data, ext) ⇒ Chunk(byteTransformer.onNext(data).join, ext) :: Nil
-            case l: LastChunk ⇒
-              sentLastChunk = true
-              Chunk(byteTransformer.onTermination(None).join) :: l :: Nil
-          }
-          override def onError(cause: scala.Throwable): Unit = byteTransformer.onError(cause)
-          override def onTermination(e: Option[Throwable]): immutable.Seq[ChunkStreamPart] = {
-            val remaining =
-              if (e.isEmpty && !sentLastChunk) byteTransformer.onTermination(None)
-              else if (e.isDefined /* && sentLastChunk */ ) byteTransformer.onTermination(e)
-              else Nil
-
-            if (remaining.nonEmpty) Chunk(remaining.join) :: Nil
-            else Nil
+          override def onPush(element: ChunkStreamPart, ctxt: Context[ChunkStreamPart]): Directive = {
+            element match {
+              case Chunk(data, ext) ⇒
+                resultIterator = Iterator.single(Chunk(byteTransformer.onNext(data).join, ext))
+              case l: LastChunk ⇒
+                sentLastChunk = true
+                resultIterator = Iterator(Chunk(byteTransformer.onTermination(None).join), l)
+            }
+            if (resultIterator.isEmpty) ctxt.pull()
+            else ctxt.push(resultIterator.next())
           }
 
-          override def cleanup(): Unit = byteTransformer.cleanup()
+          override def onPull(ctxt: Context[ChunkStreamPart]): Directive = {
+            if (resultIterator.hasNext)
+              ctxt.push(resultIterator.next())
+            else if (isFinishing) {
+              val remaining =
+                if (!sentLastChunk) byteTransformer.onTermination(None)
+                // FIXME handle error case
+                //              else if (e.isDefined /* && sentLastChunk */ ) byteTransformer.onTermination(e)
+                else Nil
+
+              if (remaining.nonEmpty) {
+                cleanup()
+                ctxt.pushAndFinish(Chunk(remaining.join))
+              } else {
+                cleanup()
+                ctxt.finish()
+              }
+            } else
+              ctxt.pull()
+          }
+
+          override def onUpstreamFinish(ctxt: Context[ChunkStreamPart]): Directive = ctxt.absorbTermination()
+
+          override def onFailure(cause: Throwable, ctxt: Context[ChunkStreamPart]): Directive = {
+            // FIXME emit onError elements from onPull?
+            byteTransformer.onError(cause)
+            ctxt.fail(cause)
+          }
+
+          // FIXME needed?
+          private def cleanup(): Unit = byteTransformer.cleanup()
         })
 
       HttpEntity.Chunked(contentType, newChunks)

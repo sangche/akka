@@ -57,4 +57,4 @@ abstract class TransformerLike[-T, +U] {
  * @see [[akka.stream.scaladsl.Flow#transform]]
  * @see [[akka.stream.javadsl.Flow#transform]]
  */
-abstract class Transformer[-T, +U] extends TransformerLike[T, U]
+abstract class OldTransformer[-T, +U] extends TransformerLike[T, U] // FIXME remove

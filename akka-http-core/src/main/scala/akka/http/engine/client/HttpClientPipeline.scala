@@ -54,13 +54,13 @@ private[http] class HttpClientPipeline(effectiveSettings: ClientConnectionSettin
       val requestPipeline =
         Flow[(HttpRequest, Any)]
           .map(requestMethodByPass)
-          .transform("renderer", () ⇒ requestRendererFactory.newRenderer)
+          .transform2("renderer", () ⇒ requestRendererFactory.newRenderer)
           .flatten(FlattenStrategy.concat)
-          .transform("errorLogger", () ⇒ errorLogger(log, "Outgoing request stream error"))
+          .transform2("errorLogger", () ⇒ errorLogger(log, "Outgoing request stream error"))
 
       val responsePipeline =
         Flow[ByteString]
-          .transform("rootParser", () ⇒ rootParser.copyWith(warnOnIllegalHeader, requestMethodByPass))
+          .transform2("rootParser", () ⇒ rootParser.copyWith(warnOnIllegalHeader, requestMethodByPass))
           .splitWhen(_.isInstanceOf[MessageStart])
           .headAndTail
           .collect {

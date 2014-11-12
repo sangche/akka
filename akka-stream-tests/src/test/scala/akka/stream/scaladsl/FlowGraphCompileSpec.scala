@@ -3,10 +3,13 @@
  */
 package akka.stream.scaladsl
 
-import akka.stream.{ OverflowStrategy, Transformer }
+import akka.stream.OverflowStrategy
 import akka.stream.FlowMaterializer
 import akka.stream.testkit.AkkaSpec
 import akka.stream.testkit.StreamTestKit.{ PublisherProbe, SubscriberProbe }
+import akka.stream.impl.fusing.TransitivePullOp
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.Context
 
 object FlowGraphCompileSpec {
   class Fruit
@@ -18,18 +21,19 @@ class FlowGraphCompileSpec extends AkkaSpec {
 
   implicit val mat = FlowMaterializer()
 
-  def op[In, Out]: () ⇒ Transformer[In, Out] = { () ⇒
-    new Transformer[In, Out] {
-      override def onNext(elem: In) = List(elem.asInstanceOf[Out])
+  def op[In, Out]: () ⇒ TransitivePullOp[In, Out] = { () ⇒
+    new TransitivePullOp[In, Out] {
+      override def onPush(elem: In, ctxt: Context[Out]): Directive =
+        ctxt.push(elem.asInstanceOf[Out])
     }
   }
 
-  val f1 = Flow[String].transform("f1", op[String, String])
-  val f2 = Flow[String].transform("f2", op[String, String])
-  val f3 = Flow[String].transform("f3", op[String, String])
-  val f4 = Flow[String].transform("f4", op[String, String])
-  val f5 = Flow[String].transform("f5", op[String, String])
-  val f6 = Flow[String].transform("f6", op[String, String])
+  val f1 = Flow[String].transform2("f1", op[String, String])
+  val f2 = Flow[String].transform2("f2", op[String, String])
+  val f3 = Flow[String].transform2("f3", op[String, String])
+  val f4 = Flow[String].transform2("f4", op[String, String])
+  val f5 = Flow[String].transform2("f5", op[String, String])
+  val f6 = Flow[String].transform2("f6", op[String, String])
 
   val in1 = Source(List("a", "b", "c"))
   val in2 = Source(List("d", "e", "f"))
@@ -160,7 +164,7 @@ class FlowGraphCompileSpec extends AkkaSpec {
         val out2 = Sink.publisher[String]
         val out9 = Sink.publisher[String]
         val out10 = Sink.publisher[String]
-        def f(s: String) = Flow[String].transform(s, op[String, String])
+        def f(s: String) = Flow[String].transform2(s, op[String, String])
         import FlowGraphImplicits._
 
         in7 ~> f("a") ~> b7 ~> f("b") ~> m11 ~> f("c") ~> b11 ~> f("d") ~> out2

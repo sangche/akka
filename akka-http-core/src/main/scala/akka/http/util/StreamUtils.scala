@@ -6,7 +6,7 @@ package akka.http.util
 
 import akka.http.model.RequestEntity
 import akka.stream.impl.ErrorPublisher
-import akka.stream.Transformer
+import akka.stream.OldTransformer
 import akka.stream.FlowMaterializer
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
@@ -23,8 +23,8 @@ private[http] object StreamUtils {
   /**
    * Maps a transformer by strictly applying the given function to each output element.
    */
-  def mapTransformer[T, U, V](t: Transformer[T, U], f: U ⇒ V): Transformer[T, V] =
-    new Transformer[T, V] {
+  def mapTransformer[T, U, V](t: OldTransformer[T, U], f: U ⇒ V): OldTransformer[T, V] =
+    new OldTransformer[T, V] {
       override def isComplete: Boolean = t.isComplete
 
       def onNext(element: T): immutable.Seq[V] = t.onNext(element).map(f)
@@ -37,8 +37,8 @@ private[http] object StreamUtils {
    * Creates a transformer that will call `f` for each incoming ByteString and output its result. After the complete
    * input has been read it will call `finish` once to determine the final ByteString to post to the output.
    */
-  def byteStringTransformer(f: ByteString ⇒ ByteString, finish: () ⇒ ByteString): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
+  def byteStringTransformer(f: ByteString ⇒ ByteString, finish: () ⇒ ByteString): OldTransformer[ByteString, ByteString] =
+    new OldTransformer[ByteString, ByteString] {
       def onNext(element: ByteString): immutable.Seq[ByteString] = f(element) :: Nil
 
       override def onTermination(e: Option[Throwable]): immutable.Seq[ByteString] =
@@ -52,15 +52,15 @@ private[http] object StreamUtils {
   def failedPublisher[T](ex: Throwable): Publisher[T] =
     ErrorPublisher(ex).asInstanceOf[Publisher[T]]
 
-  def mapErrorTransformer[T](f: Throwable ⇒ Throwable): Transformer[T, T] =
-    new Transformer[T, T] {
+  def mapErrorTransformer[T](f: Throwable ⇒ Throwable): OldTransformer[T, T] =
+    new OldTransformer[T, T] {
       def onNext(element: T): immutable.Seq[T] = immutable.Seq(element)
       override def onError(cause: scala.Throwable): Unit = throw f(cause)
     }
 
-  def sliceBytesTransformer(start: Long, length: Long): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
-      type State = Transformer[ByteString, ByteString]
+  def sliceBytesTransformer(start: Long, length: Long): OldTransformer[ByteString, ByteString] =
+    new OldTransformer[ByteString, ByteString] {
+      type State = OldTransformer[ByteString, ByteString]
 
       def skipping = new State {
         var toSkip = start
@@ -105,8 +105,8 @@ private[http] object StreamUtils {
 /**
  * INTERNAL API
  */
-private[http] class EnhancedTransformer[T, U](val t: Transformer[T, U]) extends AnyVal {
-  def map[V](f: U ⇒ V): Transformer[T, V] = StreamUtils.mapTransformer(t, f)
+private[http] class EnhancedTransformer[T, U](val t: OldTransformer[T, U]) extends AnyVal {
+  def map[V](f: U ⇒ V): OldTransformer[T, V] = StreamUtils.mapTransformer(t, f)
 }
 
 /**
