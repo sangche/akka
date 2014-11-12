@@ -59,8 +59,6 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
   private[this] var receivedInitialBoundary = false
   private[this] var terminated = false
 
-  override def isComplete = terminated
-
   def warnOnIllegalHeader(errorInfo: ErrorInfo): Unit =
     if (illegalHeaderWarnings) log.warning(errorInfo.withSummaryPrepended("Illegal multipart header").formatPretty)
 
@@ -72,7 +70,8 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
       case NotEnoughDataException ⇒ throw new IllegalStateException(NotEnoughDataException) // we are missing a try/catch{continue} wrapper somewhere
     }
     resultIterator = result.toList.iterator
-    if (resultIterator.isEmpty) ctxt.pull()
+    if (resultIterator.isEmpty && terminated) ctxt.finish() // FIXME verify usage of terminated
+    else if (resultIterator.isEmpty) ctxt.pull()
     else ctxt.push(resultIterator.next())
   }
 
@@ -80,7 +79,7 @@ private[http] final class BodyPartParser(defaultContentType: ContentType,
     if (resultIterator.hasNext)
       ctxt.push(resultIterator.next())
     else if (isFinishing) {
-      if (terminated || !receivedInitialBoundary)
+      if (terminated || !receivedInitialBoundary) // FIXME verify usage of terminated
         ctxt.finish()
       else
         ctxt.pushAndFinish(ParseError(ErrorInfo("Unexpected end of multipart entity")))

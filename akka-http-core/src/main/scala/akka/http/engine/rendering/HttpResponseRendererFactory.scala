@@ -53,12 +53,9 @@ private[http] class HttpResponseRendererFactory(serverHeader: Option[headers.Ser
   def newRenderer: HttpResponseRenderer = new HttpResponseRenderer
 
   final class HttpResponseRenderer extends TransitivePullOp[ResponseRenderingContext, Source[ByteString]] {
-    private[this] var close = false // signals whether the connection is to be closed after the current response
-
-    override def isComplete = close
-
     override def onPush(ctx: ResponseRenderingContext, opCtxt: Context[Source[ByteString]]): Directive = {
       val r = new ByteStringRendering(responseHeaderSizeHint)
+      var close = false // signals whether the connection is to be closed after the current response
 
       import ctx.response._
       val noEntity = entity.isKnownEmpty || ctx.requestMethod == HttpMethods.HEAD
@@ -172,7 +169,11 @@ private[http] class HttpResponseRendererFactory(serverHeader: Option[headers.Ser
         }
 
       renderStatusLine()
-      opCtxt.push(completeResponseRendering(entity))
+      val result = completeResponseRendering(entity)
+      if (close)
+        opCtxt.pushAndFinish(result)
+      else
+        opCtxt.push(result)
     }
   }
 }

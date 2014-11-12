@@ -33,7 +33,6 @@ private[http] abstract class HttpMessageParser[Output >: ParserOutput.MessageOut
   private[this] var state: ByteString ⇒ StateResult = startNewMessage(_, 0)
   private[this] var protocol: HttpProtocol = `HTTP/1.1`
   private[this] var terminated = false
-  override def isComplete = terminated
 
   override def onPush(input: ByteString, ctxt: Context[Output]): Directive = {
     result.clear()
@@ -43,12 +42,14 @@ private[http] abstract class HttpMessageParser[Output >: ParserOutput.MessageOut
       case NotEnoughDataException ⇒ throw new IllegalStateException // we are missing a try/catch{continue} wrapper somewhere
     }
     resultIterator = result.toList.iterator
-    if (resultIterator.isEmpty) ctxt.pull()
+    if (resultIterator.isEmpty && terminated) ctxt.finish() // FIXME verify usage of terminated
+    else if (resultIterator.isEmpty) ctxt.pull()
     else ctxt.push(resultIterator.next())
   }
 
   override def onPull(ctxt: Context[Output]): Directive =
     if (resultIterator.hasNext) ctxt.push(resultIterator.next())
+    else if (terminated) ctxt.finish() // FIXME verify usage of terminated
     else ctxt.pull()
 
   def startNewMessage(input: ByteString, offset: Int): StateResult = {

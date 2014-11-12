@@ -16,8 +16,10 @@ import akka.util.ByteString
 import akka.actor.ActorSystem
 import akka.stream.scaladsl._
 import akka.stream.FlowMaterializer
-import akka.stream.Transformer
 import akka.http.model.HttpEntity._
+import akka.stream.impl.fusing.Context
+import akka.stream.impl.fusing.Directive
+import akka.stream.impl.fusing.DeterministicOp
 
 class HttpEntitySpec extends FreeSpec with MustMatchers with BeforeAndAfterAll {
   val tpe: ContentType = ContentTypes.`application/octet-stream`
@@ -120,14 +122,23 @@ class HttpEntitySpec extends FreeSpec with MustMatchers with BeforeAndAfterAll {
       Await.result(transformed.toStrict(250.millis), 250.millis)
     }
 
-  def duplicateBytesTransformer(): Transformer[ByteString, ByteString] =
-    new Transformer[ByteString, ByteString] {
-      def onNext(bs: ByteString): immutable.Seq[ByteString] =
-        Vector(doubleChars(bs))
+  def duplicateBytesTransformer(): Flow[ByteString, ByteString] = {
+    def transformer = new DeterministicOp[ByteString, ByteString] {
+      override def onPush(bs: ByteString, ctxt: Context[ByteString]): Directive =
+        ctxt.push(doubleChars(bs))
 
-      override def onTermination(e: Option[Throwable]): immutable.Seq[ByteString] =
-        Vector(trailer)
+      override def onPull(ctxt: Context[ByteString]): Directive = {
+        if (isFinishing)
+          ctxt.pushAndFinish(trailer)
+        else
+          ctxt.pull()
+      }
+
+      override def onUpstreamFinish(ctxt: Context[ByteString]): Directive = ctxt.absorbTermination()
     }
+
+    Flow[ByteString].transform2("duplicateBytesTransformer", () => transformer)
+  }
 
   def trailer: ByteString = ByteString("--dup")
   def doubleChars(bs: ByteString): ByteString = ByteString(bs.flatMap(b ⇒ Seq(b, b)): _*)
